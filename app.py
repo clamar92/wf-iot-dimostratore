@@ -1,88 +1,131 @@
-# app.py — Step 1 (clean): single request, 3–5 candidate providers, 3D two-layer view
+# app.py — DT Request Demo (no sidebar) — 30 nodes, per-service providers & bad sets, radio wrapped, stable plot
 import numpy as np
 import networkx as nx
 import plotly.graph_objects as go
 import streamlit as st
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 st.set_page_config(page_title="DT Request Demo — Step 1", layout="wide")
 
-# -------------------- Types & State -------------------- #
+# Hide Streamlit top header + kill any horizontal scrollbar + disable clickable headings
+st.markdown("""
+<style>
+/* nascondi header Streamlit */
+header[data-testid="stHeader"] { display: none !important; }
+.block-container { padding-top: 0.5rem; }
+
+/* niente scrollbar orizzontale globale */
+html, body, [data-testid="stAppViewContainer"] { overflow-x: hidden !important; }
+
+/* -- Rendi NON cliccabili i titoli (rimuovi i permalinks) -- */
+h1 a, h2 a, h3 a, h4 a, h5 a, h6 a,
+[data-testid="stMarkdownContainer"] h1 a,
+[data-testid="stMarkdownContainer"] h2 a,
+[data-testid="stMarkdownContainer"] h3 a,
+[data-testid="stMarkdownContainer"] h4 a,
+[data-testid="stMarkdownContainer"] h5 a,
+[data-testid="stMarkdownContainer"] h6 a {
+  pointer-events: none !important;   /* disabilita click */
+  color: inherit !important;         /* niente colore "link" */
+  text-decoration: none !important;  /* niente sottolineatura */
+}
+/* opzionale: nascondi l'iconcina del link se presente */
+h1 a svg, h2 a svg, h3 a svg, h4 a svg, h5 a svg, h6 a svg { display: none !important; }
+</style>
+""", unsafe_allow_html=True)
+
+SERVICES = ["Temperature", "Humidity", "Power"]
+
+# -------------------- State -------------------- #
 @dataclass
 class Scene:
-    n: int
-    mal_pct: int                # % malicious nodes
-    seed: int
-    requester: int
-    candidates: list[int]
-    selected: int | None
-    t_true: float | None
-    service_value: float | None
-    requested: bool
-    evaluated: bool
-    malicious: set[int]
+    n: int = 30                 # fisso a 30 nodi
+    seed: int = 42
+    created: bool = False
+    Gdt: nx.Graph | None = None
+    pos_rl3d: dict = field(default_factory=dict)
+    pos_dt3d: dict = field(default_factory=dict)
+    avg_deg_target: int = 4
+    # per-service: providers (30–50%) e bad responders (30%) — DEVONO essere diversi per servizio
+    providers_by_service: dict = field(default_factory=lambda: {s: set() for s in SERVICES})
+    bad_by_service: dict = field(default_factory=lambda: {s: set() for s in SERVICES})
+    requester: int = 0
+    service: str = "Temperature"
+    providers: list[int] = field(default_factory=list)     # candidati per il servizio selezionato
+    selected: int | None = None
+    evaluated: bool = False
+    readings: dict = field(default_factory=dict)           # (service, provider) -> value
+    last_plot_key: tuple | None = None                     # evita ridisegno inutile
 
-# -------------------- Graph & Rendering -------------------- #
-def build_layers_3d(n=20, seed=42, k=4, rewire_p=0.25, z_sep=1):
-    """
-    DT graph (Watts–Strogatz) and two 3D layers:
-    - Real devices: z = 0
-    - Digital Twins: z = z_sep
-    """
-    Gdt = nx.watts_strogatz_graph(n=n, k=min(k, max(2, n//3)), p=rewire_p, seed=int(seed))
+if "scene" not in st.session_state:
+    st.session_state.scene = Scene()
+S: Scene = st.session_state.scene
+
+# --- unique keys per i chart (evita conflitti Streamlit) --- #
+if "_graph_key_counter" not in st.session_state:
+    st.session_state._graph_key_counter = 0
+
+def _next_graph_key(tag="g"):
+    st.session_state._graph_key_counter += 1
+    return f"{tag}-{S.seed}-{st.session_state._graph_key_counter}"
+
+# -------------------- Graph helpers -------------------- #
+def build_layers_3d(n=30, seed=42, target_avg_deg=4, z_sep=0.6):
+    """Grafo ER connesso (grado medio ≈ 3–5) e posizioni 3D per Real(z=0) & DT(z=z_sep)."""
+    rng = np.random.default_rng(seed)
+    p = min(1.0, float(target_avg_deg) / max(1, (n - 1)))
+
+    # Tenta più ER; se ancora disconnesso, collega componenti con pochi edge extra
+    for _ in range(6):
+        Gdt = nx.erdos_renyi_graph(n=n, p=p, seed=int(rng.integers(0, 1_000_000)))
+        if nx.is_connected(Gdt):
+            break
+    if not nx.is_connected(Gdt):
+        comps = [list(c) for c in nx.connected_components(Gdt)]
+        for a, b in zip(comps, comps[1:]):
+            u = int(rng.choice(a)); v = int(rng.choice(b))
+            Gdt.add_edge(u, v)
+
     pos2d = nx.spring_layout(Gdt, seed=int(seed), dim=2)
-
     xs = np.array([pos2d[i][0] for i in range(n)], dtype=float)
     ys = np.array([pos2d[i][1] for i in range(n)], dtype=float)
-
-    # Normalize to [-1, 1] (NumPy 2.0-safe)
     ptp_x = float(np.ptp(xs));  ptp_y = float(np.ptp(ys))
     if ptp_x > 0: xs = 2.0 * (xs - float(np.min(xs))) / ptp_x - 1.0
     if ptp_y > 0: ys = 2.0 * (ys - float(np.min(ys))) / ptp_y - 1.0
-
     pos_dt3d = {i: (float(xs[i]), float(ys[i]), float(z_sep)) for i in range(n)}
     pos_rl3d = {i: (float(xs[i]), float(ys[i]), 0.0) for i in range(n)}
     return Gdt, pos_rl3d, pos_dt3d
 
 def fig_two_layers_3d(Gdt, pos_rl3d, pos_dt3d, requester, candidates, selected):
-    """
-    3D scene:
-    - DT↔DT: blue lines (upper plane)
-    - Real↔DT: light-gray dashed vertical links (fine & dense)
-    - Real nodes larger; DT nodes color-coded for role
-    """
+    """Scena statica: DT↔DT (azzurro), Real↔DT verticali tratteggiate, nodi con colori di ruolo."""
     fig = go.Figure()
 
-    # DT edges (continuous)
+    # DT edges
     x_e, y_e, z_e = [], [], []
     for u, v in Gdt.edges():
         x0, y0, z0 = pos_dt3d[u]; x1, y1, z1 = pos_dt3d[v]
         x_e += [x0, x1, None]; y_e += [y0, y1, None]; z_e += [z0, z1, None]
     fig.add_trace(go.Scatter3d(
         x=x_e, y=y_e, z=z_e, mode="lines",
-        line=dict(width=4, color="#9ec9ff"), opacity=0.6,
-        hoverinfo="skip", name="DT links"
+        line=dict(width=4, color="#9ec9ff"), opacity=0.6, hoverinfo="skip", name="DT links"
     ))
 
-    # Real↔DT dashed verticals (dense & thin)
+    # Vertical dashed
     xv, yv, zv = [], [], []
-    n_dashes = 60
-    duty     = 0.45
+    n_dashes = 60; duty = 0.45
     for i in pos_rl3d:
         x0, y0, z0 = pos_rl3d[i]; x1, y1, z1 = pos_dt3d[i]
         zmin, zmax = (z0, z1) if z1 >= z0 else (z1, z0)
         dz = (zmax - zmin) / n_dashes
         for k in range(n_dashes):
-            zs = zmin + k*dz
-            ze = zmin + (k + duty)*dz
+            zs = zmin + k*dz; ze = zmin + (k + duty)*dz
             xv += [x0, x0, None];  yv += [y0, y0, None];  zv += [zs, ze, None]
     fig.add_trace(go.Scatter3d(
         x=xv, y=yv, z=zv, mode="lines",
-        line=dict(width=2, color="#c8c8c8"), opacity=0.9,
-        hoverinfo="skip", name="Real→DT (dashed)"
+        line=dict(width=2, color="#c8c8c8"), opacity=0.9, hoverinfo="skip", name="Real→DT (dashed)"
     ))
 
-    # Real nodes (bigger)
+    # Real nodes
     xr = [pos_rl3d[i][0] for i in pos_rl3d]
     yr = [pos_rl3d[i][1] for i in pos_rl3d]
     zr = [pos_rl3d[i][2] for i in pos_rl3d]
@@ -94,162 +137,252 @@ def fig_two_layers_3d(Gdt, pos_rl3d, pos_dt3d, requester, candidates, selected):
         name="Real"
     ))
 
-    # DT nodes (role-based style)
-    xd = []; yd = []; zd = []; colors = []; sizes = []; labels = []
+    # DT nodes (colori per ruolo)
+    xd, yd, zd, colors, sizes, labels = [], [], [], [], [], []
     for i, (x, y, z) in pos_dt3d.items():
         if i == requester:
-            colors.append("#FFD166"); sizes.append(16); label = f"DT #{i} (Requester)"
+            colors.append("#FFD166"); sizes.append(16); label = f"DT {i} (Requester)"
         elif selected is not None and i == selected:
-            colors.append("#EF476F"); sizes.append(18); label = f"DT #{i} (Selected)"
+            colors.append("#EF476F"); sizes.append(18); label = f"DT {i} (Selected)"
         elif i in candidates:
-            colors.append("#06D6A0"); sizes.append(14); label = f"DT #{i} (Candidate)"
+            colors.append("#06D6A0"); sizes.append(14); label = f"DT {i} (Candidate)"
         else:
-            colors.append("#118AB2"); sizes.append(12); label = f"DT #{i}"
+            colors.append("#118AB2"); sizes.append(12); label = f"DT {i}"
         xd.append(x); yd.append(y); zd.append(z); labels.append(label)
     fig.add_trace(go.Scatter3d(
         x=xd, y=yd, z=zd, mode="markers",
         marker=dict(size=sizes, color=colors, line=dict(width=1.2, color="#222")),
-        hovertemplate="%{text}<extra></extra>", text=labels,
-        name="Digital Twins"
+        hovertemplate="%{text}<extra></extra>", text=labels, name="Digital Twins"
     ))
 
-    # Calcolo il range Z dai punti (così non devo passare z_sep)
-    z_vals = [p[2] for p in pos_rl3d.values()] + [p[2] for p in pos_dt3d.values()]
-
+    # Layout
+    z_vals = ([p[2] for p in pos_rl3d.values()] + [p[2] for p in pos_dt3d.values()]) if pos_dt3d else [0, 1]
     fig.update_layout(
-        height=650, margin=dict(l=0, r=0, t=30, b=0),
+        uirevision="keep",  # conserva zoom/camera
+        showlegend=False,
+        height=650, margin=dict(l=0, r=0, t=10, b=0),
         scene=dict(
             xaxis=dict(visible=False), yaxis=dict(visible=False),
             zaxis=dict(visible=False, range=[min(z_vals)-0.02, max(z_vals)+0.02]),
-            aspectmode="manual",
-            aspectratio=dict(x=1, y=1, z=0.3),  # z più piccolo = layer più vicini visivamente
-            camera=dict(
-                eye=dict(x=0.6, y=1, z=0.6),
-                center=dict(x=0.0, y=0.0, z=-0.2))
-        ),
-        legend=dict(
-            orientation="h",
-            yanchor="bottom", y=1.02, x=0.02,
-            font=dict(size=16)   # <-- dimensione testo legenda
+            aspectmode="manual", aspectratio=dict(x=1, y=1, z=0.3),
+            camera=dict(eye=dict(x=0.9, y=1.0, z=0.6))
         )
     )
     return fig
 
-# -------------------- Simple environment & service -------------------- #
-def simulate_temperature_field(n, seed=42):
-    rng = np.random.default_rng(seed + 200)
-    base = 22 + rng.normal(0, 2, 1)[0]      # ambient baseline
-    spatial = np.linspace(-0.8, 0.8, n)     # simple gradient
-    return base, spatial
+# -------------------- Valori dei servizi -------------------- #
+def provider_reading(
+    service: str,
+    provider_id: int,
+    bad_by_service: dict[str, set[int]],
+    rng: np.random.Generator
+) -> float:
+    """
+    Valori per servizio:
+      Temperature:  TRUE 25–27 °C    | FALSE ~20±0.5 o ~30±0.5
+      Humidity:     TRUE 45–50 %     | FALSE ~20±2   o ~90±2
+      Power:        TRUE 20–25 W     | FALSE ~-100±50 o ~3000±50
+    """
+    is_bad = provider_id in bad_by_service.get(service, set())
 
-def provider_reading(t_true, provider_id, malicious: set[int], seed=42):
-    rng = np.random.default_rng(seed + 300 + provider_id)
-    if provider_id in malicious:
-        # Malicious: "a couple of degrees" off (+/- ~2 ± 0.5 °C)
-        sign = 1 if rng.random() < 0.5 else -1
-        offset = 2.0 + rng.normal(0, 0.5)
-        return float(t_true + sign * offset)
-    else:
-        # Benevolent: very close to truth
-        return float(t_true + rng.normal(0, 0.25))
+    if service == "Temperature":
+        if is_bad:
+            center = 20.0 if rng.random() < 0.5 else 30.0
+            return float(center + rng.normal(0, 0.5))
+        else:
+            return float(rng.uniform(25.0, 27.0))
 
-# -------------------- Init state -------------------- #
-if "scene" not in st.session_state:
-    st.session_state.scene = Scene(
-        n=20, mal_pct=20, seed=42,
-        requester=0, candidates=[], selected=None,
-        t_true=None, service_value=None,
-        requested=False, evaluated=False,
-        malicious=set()
-    )
-S: Scene = st.session_state.scene
+    elif service == "Humidity":
+        if is_bad:
+            center = 20.0 if rng.random() < 0.5 else 90.0
+            return float(center + rng.normal(0, 2.0))
+        else:
+            return float(rng.uniform(45.0, 50.0))
 
-# -------------------- Sidebar (ONLY what you asked) -------------------- #
-with st.sidebar:
-    st.header("Scenario")
-    S.n = st.slider("Number of nodes", 8, 30, S.n, 1)
-    S.mal_pct = st.slider("Malicious nodes (%)", 0, 100, S.mal_pct, 5)
-    st.caption("Step 1: No trust, only service discovery and evaluation.")
+    elif service == "Power":
+        if is_bad:
+            center = -100.0 if rng.random() < 0.5 else 3000.0
+            return float(center + rng.normal(0, 50.0))
+        else:
+            return float(rng.uniform(20.0, 25.0))
 
-# -------------------- Build world & malicious set -------------------- #
-Gdt, pos_rl3d, pos_dt3d = build_layers_3d(n=S.n, seed=S.seed)
-# Recompute malicious set if needed
-rng_global = np.random.default_rng(S.seed + 7)
-k_mal = int(round(S.n * (S.mal_pct / 100.0)))
-if len(S.malicious) != k_mal or any(i >= S.n for i in S.malicious):
-    S.malicious = set(rng_global.choice(list(range(S.n)), size=k_mal, replace=False)) if k_mal > 0 else set()
+    return float("nan")
 
-# Reset selections if graph size changed
-if S.requester >= S.n:
-    S.requester = 0
-    S.candidates = []
-    S.selected = None
-    S.requested = False
-    S.evaluated = False
-    S.service_value = None
-    S.t_true = None
+# -------------------- Init una tantum -------------------- #
+def ensure_network_ready():
+    if not S.created:
+        # usa un seed base, poi derivate diverse per ogni servizio => set diversi garantiti
+        base_seed =  int(np.random.default_rng().integers(0, 10**9))
+        S.seed = base_seed
+
+        # grafo
+        S.avg_deg_target = 4
+        S.Gdt, S.pos_rl3d, S.pos_dt3d = build_layers_3d(
+            n=S.n, seed=S.seed, target_avg_deg=S.avg_deg_target, z_sep=0.6
+        )
+
+        # per-service: providers (30–50%) e bad (30%), con SEED DIVERSO PER SERVIZIO
+        nodes = np.arange(S.n)
+        S.providers_by_service = {}
+        S.bad_by_service = {}
+
+        m_min = int(np.ceil(0.30 * S.n))
+        m_max = int(np.floor(0.50 * S.n))
+        bad_k = int(round(0.30 * S.n))
+
+        for idx, srv in enumerate(SERVICES):
+            # provider: 30–50% con seed dedicato per servizio
+            rng_prov = np.random.default_rng(S.seed + 1000 + idx)
+            m = int(rng_prov.integers(m_min, m_max + 1))
+            prov = set(map(int, rng_prov.choice(nodes, size=m, replace=False)))
+
+            # bad: 30% con altro seed specifico per servizio
+            rng_bad = np.random.default_rng(S.seed + 2000 + idx)
+            bad = set(map(int, rng_bad.choice(nodes, size=bad_k, replace=False))) if bad_k > 0 else set()
+
+            S.providers_by_service[srv] = prov
+            S.bad_by_service[srv] = bad
+
+        S.created = True
+
+ensure_network_ready()
 
 # -------------------- Layout -------------------- #
 left, right = st.columns([1.2, 1])
 
 with left:
-    st.subheader("Digital Twins network")
-    fig = fig_two_layers_3d(Gdt, pos_rl3d, pos_dt3d, S.requester, S.candidates, S.selected)
-    st.plotly_chart(fig, use_container_width=True)
+    st.title("Digital Twins Network")
 
+    # Legenda statica in UNA riga
+    st.markdown(
+        """
+        <div style="display:flex; gap:28px; align-items:center; flex-wrap:nowrap; overflow-x:auto; padding:4px 2px 8px 2px;">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span style="display:inline-block;width:12px;height:12px;border-radius:50%; background:#118AB2;border:1.2px solid #222;"></span>
+            <span style="font-size:0.95rem;">DT (generic)</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span style="display:inline-block;width:12px;height:12px;border-radius:50%; background:#FFD166;border:1.2px solid #222;"></span>
+            <span style="font-size:0.95rem;">Requester</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span style="display:inline-block;width:12px;height:12px;border-radius:50%; background:#06D6A0;border:1.2px solid #222;"></span>
+            <span style="font-size:0.95rem;">Candidate</span>
+          </div>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span style="display:inline-block;width:12px;height:12px;border-radius:50%; background:#EF476F;border:1.2px solid #222;"></span>
+            <span style="font-size:0.95rem;">Selected</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+
+    # CSS: radio providers su più colonne (wrapping)
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stRadio"] > div {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.35rem 0.75rem;
+        }
+        div[data-testid="stRadio"] label {
+            min-width: 90px;  /* aumenta/diminuisci per +/− colonne */
+            padding: 2px 2px;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
+    graph_placeholder = st.empty()
+
+def current_plot_key():
+    return (
+        "draw",
+        S.Gdt.number_of_edges() if S.Gdt is not None else 0,
+        S.requester,
+        tuple(sorted(S.providers)),
+        S.selected
+    )
+
+def draw_graph_if_needed(force=False):
+    key_state = current_plot_key()
+    if force or (S.last_plot_key != key_state):
+        graph_placeholder.empty()
+        fig = fig_two_layers_3d(S.Gdt, S.pos_rl3d, S.pos_dt3d, S.requester, S.providers, S.selected)
+        graph_placeholder.plotly_chart(fig, use_container_width=True, key=_next_graph_key("final"), config={"displayModeBar": False})
+        S.last_plot_key = current_plot_key()
+
+# Primo draw
+draw_graph_if_needed(force=True)
+
+# -------------------- Right: controls -------------------- #
 with right:
-    st.subheader("Service Request")
-    # Requester picker (moved to the right)
+    st.subheader("Service Request Scenario")
+
+    # Requester & Service
     S.requester = st.selectbox(
         "Requester",
         options=list(range(S.n)),
-        index=S.requester,
-        format_func=lambda i: f"DT {i}"
+        index=min(S.requester, S.n-1),
+        format_func=lambda i: f"DT {i}",
     )
 
-    # Candidate selection
-    neighbors = list(Gdt.neighbors(S.requester))
-    pool = neighbors if len(neighbors) >= 3 else list(set(range(S.n)) - {S.requester})
-    if st.button("Discovery Providers"):
-        m = int(rng_global.integers(3, 6))  # 3..5 providers
-        m = min(m, max(1, len(pool)))
-        S.candidates = list(rng_global.choice(pool, size=m, replace=False)) if pool else []
-        S.selected = None
-        S.requested = False
-        S.evaluated = False
-        S.service_value = None
-        S.t_true = None
+    S.service = st.selectbox(
+        "Service",
+        SERVICES,
+        index=SERVICES.index(S.service) if S.service in SERVICES else 0
+    )
 
-    if S.candidates:
-        S.selected = st.radio("Choose one provider", options=S.candidates, format_func=lambda i: f"DT #{i}")
-
-    st.markdown("---")
-    st.subheader("Interaction")
-
-    # Gate 1: show "Request service" only after selecting a provider
-    if S.selected is not None:
-        base, spatial = simulate_temperature_field(S.n, seed=S.seed)
-        if st.button("Request service"):
-            S.t_true = float(base + spatial[S.requester] + np.random.normal(0, 0.2))
-            S.service_value = provider_reading(S.t_true, S.selected, S.malicious, seed=S.seed)
-            S.requested = True
+    # Aggiorna candidati per il servizio selezionato (fissi 30–50%), escludendo il requester
+    base_set = set(S.providers_by_service.get(S.service, set()))
+    base_set.discard(S.requester)
+    new_providers = sorted(base_set) if base_set else []
+    if new_providers != S.providers:
+        S.providers = new_providers
+        if S.selected not in S.providers:
+            S.selected = None
             S.evaluated = False
+    draw_graph_if_needed(force=True)
 
-    # Show service value if requested
-    if S.requested and S.service_value is not None and S.selected is not None:
-        st.metric(f"Service value from DT {S.selected}", f"{S.service_value:.1f} °C")
+    # Provider via RADIO (niente pulsanti), su più "colonne" grazie al wrapping CSS
+    if S.providers:
+        st.markdown("**Service Discovery**")
+        radio_key = f"providers-radio-{S.service}-{S.requester}"
+        sel = st.radio(
+            label="Providers",                    # label non vuota
+            options=S.providers,
+            format_func=lambda i: f"DT {i}",
+            horizontal=True,
+            key=radio_key,
+            label_visibility="collapsed"         # nascosto a schermo, ma niente warning
+        )
+        if sel != S.selected:
+            S.selected = sel
+            S.evaluated = False
+            draw_graph_if_needed(force=True)
 
-        # Gate 2: Evaluate after requesting
-        if st.button("Evaluate Service"):
-            S.evaluated = True
+        # Reading per (service, provider) — cache per non cambiare a ogni click
+        SERVICE_SEED = {"Temperature": 11, "Humidity": 22, "Power": 33}
 
-    # Final evaluation (Yes/No based on maliciousness)
-    if S.evaluated and S.selected is not None:
-        good = (S.selected not in S.malicious)
-        if good:
-            st.success("Service evaluation: Correct Service!")
-        else:
-            st.error("Service evaluation: Wrong Service!")
+        if S.selected is not None:
+            key = (S.service, S.selected)
+            if key not in S.readings:
+                base = SERVICE_SEED.get(S.service, 0)
+                rng_read = np.random.default_rng(S.seed + 777 + base + S.selected)
+                S.readings[key] = provider_reading(S.service, S.selected, S.bad_by_service, rng_read)
+            val = S.readings[key]
+            unit = " °C" if S.service == "Temperature" else (" %" if S.service == "Humidity" else " W")
+            st.metric(f"{S.service} from DT {S.selected}", f"{val:.1f}{unit}")
 
+            if st.button("Evaluate", key="eval-btn"):
+                S.evaluated = True
 
-st.caption("Step 1: No trust, only service discovery and evaluation.")
+            if S.evaluated:
+                is_bad = S.selected in S.bad_by_service[S.service]
+                if is_bad:
+                    st.error("Service evaluation: **Incorrect**")
+                else:
+                    st.success("Service evaluation: **Correct**")
