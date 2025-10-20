@@ -204,17 +204,17 @@ def is_value_benign(service: str, value: float) -> bool:
 # ------- Recommendation logic ------- #
 def compute_recommendation(is_malicious_recommender: str | None, provider_is_benign_now: bool, provider_mal_type: str | None) -> bool:
     """
-    Restituisce True -> "Provider is trustworthy", False -> "Provider is untrustworthy".
-    - None (onesto): segue la verità dell'interazione corrente (provider_is_benign_now).
+    True -> "Provider is trustworthy", False -> "Provider is untrustworthy".
+    - None (onesto): segue la verità dell’interazione corrente.
     - BMA: sempre 'untrustworthy'.
-    - BSA: 'trustworthy' se il provider è malevolo in questa interazione, altrimenti 'untrustworthy'.
+    - BSA: sempre 'trustworthy' (dice il vero sui benigni e promuove i malevoli).
     """
     if is_malicious_recommender is None:
         return provider_is_benign_now
     if is_malicious_recommender == "BMA":
         return False
     if is_malicious_recommender == "BSA":
-        return not provider_is_benign_now
+        return True
     return provider_is_benign_now
 
 
@@ -279,21 +279,23 @@ def ensure_network_ready():
             elif i in ooa_nodes:
                 S.malicious_type[int(i)] = "OOA"
 
-        # --------- Malevoli nelle raccomandazioni: 50% (BMA/BSA) separati ---------
+        # --------- Malevoli nelle raccomandazioni: 70% (35% BMA + 35% BSA) ---------
         rng_r = np.random.default_rng(S.seed + 3030)
-        num_rec_mal = S.n // 2
-        rec_mal_nodes = rng_r.choice(nodes, size=num_rec_mal, replace=False).tolist()
-        half = num_rec_mal // 2
-        bma_nodes = set(rec_mal_nodes[:half])
-        bsa_nodes = set(rec_mal_nodes[half:])
+        num_bma = int(0.35 * S.n)
+        num_bsa = int(0.35 * S.n)
+        rec_mal_nodes = rng_r.choice(np.arange(S.n), size=(num_bma + num_bsa), replace=False).tolist()
+        bma_nodes = set(rec_mal_nodes[:num_bma])
+        bsa_nodes = set(rec_mal_nodes[num_bma:])
+
         S.rec_malicious_type = {}
-        for i in nodes:
+        for i in range(S.n):
             if i in bma_nodes:
-                S.rec_malicious_type[int(i)] = "BMA"
+                S.rec_malicious_type[i] = "BMA"
             elif i in bsa_nodes:
-                S.rec_malicious_type[int(i)] = "BSA"
+                S.rec_malicious_type[i] = "BSA"
             else:
-                S.rec_malicious_type[int(i)] = None
+                S.rec_malicious_type[i] = None
+
 
         S.created = True
 
