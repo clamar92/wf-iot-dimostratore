@@ -53,7 +53,11 @@ class Scene:
     service: str = "Temperature"
     providers: list[int] = field(default_factory=list)
     selected: int | None = None
-    evaluated: bool = False
+    # --- Nuovo flusso a due step ---
+    service_requested: bool = False         # dopo pressione "Request Service"
+    evaluation_done: bool = False           # dopo pressione "Evaluate"
+    evaluation_outcome: str | None = None   # "Correct" | "Incorrect"
+    # ---
     readings: dict = field(default_factory=dict)  # (service, provider) -> value
     last_plot_key: tuple | None = None           # evita ridisegno inutile
 
@@ -209,15 +213,14 @@ def ensure_network_ready():
 
         m_min = int(np.ceil(0.30 * S.n))
         m_max = int(np.floor(0.50 * S.n))
-        bad_k = 0  # <<<< nessun malevolo
+        bad_k = 0  # nessun malevolo
 
         for idx, srv in enumerate(SERVICES):
             rng_prov = np.random.default_rng(S.seed + 1000 + idx)
             m = int(rng_prov.integers(m_min, m_max + 1))
             prov = set(map(int, rng_prov.choice(nodes, size=m, replace=False)))
 
-            # set vuoto per malevoli
-            bad = set() if bad_k == 0 else set(map(int, []))
+            bad = set() if bad_k == 0 else set()
 
             S.providers_by_service[srv] = prov
             S.bad_by_service[srv] = bad
@@ -291,16 +294,17 @@ def draw_graph_if_needed(force=False):
     key_state = current_plot_key()
     if force or (S.last_plot_key != key_state):
         fig = fig_two_layers_3d(S.Gdt, S.pos_rl3d, S.pos_dt3d, S.requester, S.providers, S.selected)
-        # NOTA: niente .empty() e chiave COSTANTE -> la camera resta
         graph_placeholder.plotly_chart(fig, use_container_width=True, key=GRAPH_KEY, config={"displayModeBar": False})
         S.last_plot_key = current_plot_key()
-
 
 # -------------------- Right: controls -------------------- #
 with right:
     st.subheader("Service Request Scenario")
 
-    # Requester & Service
+    # Requester & Service (salva i precedenti per reset consapevoli)
+    prev_requester = S.requester
+    prev_service = S.service
+
     S.requester = st.selectbox(
         "Requester",
         options=list(range(S.n)),
@@ -316,16 +320,23 @@ with right:
         key=f"{PAGE_TAG}-service"
     )
 
+    # Se cambia requester o servizio, resetta il flusso
+    if S.requester != prev_requester or S.service != prev_service:
+        S.selected = None
+        S.service_requested = False
+        S.evaluation_done = False
+        S.evaluation_outcome = None
+
     # Providers per servizio (fissi) — escludi requester
     base_set = set(S.providers_by_service.get(S.service, set()))
     base_set.discard(S.requester)
     new_providers = sorted(base_set) if base_set else []
     if new_providers != S.providers:
         S.providers = new_providers
-        if S.selected not in S.providers:
-            S.selected = None
-            S.evaluated = False
-
+        S.selected = None
+        S.service_requested = False
+        S.evaluation_done = False
+        S.evaluation_outcome = None
 
     # Provider via RADIO (wrapping CSS)
     if S.providers:
@@ -339,29 +350,48 @@ with right:
             key=radio_key,
             label_visibility="collapsed"
         )
+
+        # Se cambia il provider selezionato, resetta richiesta/valutazione
         if sel != S.selected:
             S.selected = sel
-            S.evaluated = False
+            S.service_requested = False
+            S.evaluation_done = False
+            S.evaluation_outcome = None
 
-        # Reading per (service, provider) — cache
-        SERVICE_SEED = {"Temperature": 11, "Humidity": 22, "Power": 33}
-        if S.selected is not None:
+        # ---- STEP 1: Request Service ----
+        req_btn_key = f"{PAGE_TAG}-request-btn-{S.service}-{S.requester}-{S.selected}"
+        if st.button("Request Service", key=req_btn_key, use_container_width=True):
+            S.service_requested = True
+            S.evaluation_done = False
+            S.evaluation_outcome = None
+            # Genera/aggiorna la reading SOLO alla richiesta
+            SERVICE_SEED = {"Temperature": 11, "Humidity": 22, "Power": 33}
             key = (S.service, S.selected)
-            if key not in S.readings:
-                base = SERVICE_SEED.get(S.service, 0)
-                rng_read = np.random.default_rng(S.seed + 777 + base + S.selected)
-                S.readings[key] = provider_reading(S.service, S.selected, S.bad_by_service, rng_read)
-            val = S.readings[key]
-            unit = " °C" if S.service == "Temperature" else (" %" if S.service == "Humidity" else " W")
-            st.metric(f"{S.service} from DT {S.selected}", f"{val:.1f}{unit}")
+            base = SERVICE_SEED.get(S.service, 0)
+            rng_read = np.random.default_rng(S.seed + 777 + base + S.selected)
+            S.readings[key] = provider_reading(S.service, S.selected, S.bad_by_service, rng_read)
 
-            # Invio servizio — solo messaggio "Service received"
-            if st.button("Send Service", key=f"{PAGE_TAG}-eval-btn"):
-                S.evaluated = True
+        # ---- Visualizza il servizio DOPO la richiesta ----
+        if S.service_requested and S.selected is not None:
+            key = (S.service, S.selected)
+            if key in S.readings:
+                val = S.readings[key]
+                unit = " °C" if S.service == "Temperature" else (" %" if S.service == "Humidity" else " W")
+                st.metric(f"{S.service} from DT {S.selected}", f"{val:.1f}{unit}")
 
-            if S.evaluated:
-                st.success("Service received")
+                # ---- STEP 2: Evaluate ----
+                eval_btn_key = f"{PAGE_TAG}-eval-btn-{S.service}-{S.requester}-{S.selected}"
+                if st.button("Evaluate", key=eval_btn_key, use_container_width=True):
+                    S.evaluation_done = True
+                    S.evaluation_outcome = "Correct" if np.random.random() < 0.5 else "Incorrect"
 
+                if S.evaluation_done and S.evaluation_outcome:
+                    if S.evaluation_outcome == "Correct":
+                        st.success("Result: Correct")
+                    else:
+                        st.error("Result: Incorrect")
+    else:
+        st.info("Nessun provider disponibile per il servizio selezionato.")
 
 # Disegna UNA SOLA VOLTA per run, a stato aggiornato
 draw_graph_if_needed(force=True)
