@@ -32,6 +32,25 @@ h1 a svg, h2 a svg, h3 a svg, h4 a svg, h5 a svg { display: none !important; }
 
 SERVICES = ["Temperature", "Humidity", "Power"]
 
+# --- Nomi completi per i comportamenti ---
+PROVIDER_BEHAVIOR_FULL = {
+    "ME":  "Malicious with Everyone",
+    "DA":  "Discrimination Attack",
+    "OOA": "On-Off Attack",
+}
+RECOMMENDER_BEHAVIOR_FULL = {
+    "BMA": "Bad Mouthing Attack",
+    "BSA": "Ballot Stuffing Attack",
+}
+
+def provider_behavior_full(t: str | None) -> str:
+    # Cooperativi -> Benevolent
+    return PROVIDER_BEHAVIOR_FULL.get(t, "Benevolent")
+
+def recommender_behavior_full(t: str | None) -> str:
+    # Cooperativi -> Benevolent
+    return RECOMMENDER_BEHAVIOR_FULL.get(t, "Benevolent")
+
 # -------------------- State -------------------- #
 @dataclass
 class Scene:
@@ -57,6 +76,8 @@ class Scene:
     ooa_counter: dict = field(default_factory=dict)  # (req, prov) -> int
     # Malevoli nelle raccomandazioni (indipendenti dai malevoli del servizio)
     rec_malicious_type: dict = field(default_factory=dict)  # node -> "BMA" | "BSA" | None
+    # Toggle per mostrare i comportamenti dopo Evaluate
+    show_behaviors: bool = False
 
 SCENE_KEY = "scene_step3"
 if SCENE_KEY not in st.session_state:
@@ -191,7 +212,7 @@ def provider_value(service: str, requester: int, provider: int, mal_type: str | 
         return _wrong_value_ME_ranges(service, rng) if is_wrong else _correct_value(service, rng)
     return _correct_value(service, rng)
 
-# ------- Evaluation against benign thresholds ------- #
+# ------- Evaluation against benevolent thresholds ------- #
 def is_value_benign(service: str, value: float) -> bool:
     if service == "Temperature":
         return 25.0 <= value <= 27.0
@@ -202,12 +223,12 @@ def is_value_benign(service: str, value: float) -> bool:
     return False
 
 # ------- Recommendation logic ------- #
-def compute_recommendation(is_malicious_recommender: str | None, provider_is_benign_now: bool, provider_mal_type: str | None) -> bool:
+def compute_recommendation(is_malicious_recommender: str | None, provider_is_benign_now: bool, _provider_mal_type_unused: str | None = None) -> bool:
     """
     True -> "Provider is trustworthy", False -> "Provider is untrustworthy".
-    - None (onesto): segue la verità dell’interazione corrente.
+    - None (benevolent): segue l’esito corrente (benign/malicious).
     - BMA: sempre 'untrustworthy'.
-    - BSA: sempre 'trustworthy' (dice il vero sui benigni e promuove i malevoli).
+    - BSA: sempre 'trustworthy'.
     """
     if is_malicious_recommender is None:
         return provider_is_benign_now
@@ -217,9 +238,8 @@ def compute_recommendation(is_malicious_recommender: str | None, provider_is_ben
         return True
     return provider_is_benign_now
 
-
 def render_recommendations(requester: int, selected: int, provider_mal_type: str | None, last_eval_ok: bool):
-    """Mostra le reccomandations dei neighbor del requester in base al risultato corrente."""
+    """Mostra le reccomandations dei neighbor del requester (solo DT + verdict, niente comportamenti)."""
     if S.Gdt is None:
         st.info("No neighbors available for recommendations.")
         return
@@ -227,7 +247,6 @@ def render_recommendations(requester: int, selected: int, provider_mal_type: str
         neighbors = sorted(list(S.Gdt.neighbors(requester)))
     except Exception:
         neighbors = []
-    # Escludi eventualmente il provider se è vicino
     neighbors = [n for n in neighbors if n != selected]
 
     if not neighbors:
@@ -236,15 +255,48 @@ def render_recommendations(requester: int, selected: int, provider_mal_type: str
 
     for n in neighbors:
         rec_type = S.rec_malicious_type.get(n)
-        label = f"DT {n}" + (f" ({rec_type})" if rec_type else "")
         trusts = compute_recommendation(rec_type, last_eval_ok, provider_mal_type)
         icon = "✅" if trusts else "❌"
         verdict = "Provider is trustworthy" if trusts else "Provider is untrustworthy"
-        st.write(f"{icon} {label}: {verdict}")
+        st.write(f"{icon} DT {n}: {verdict}")
+
+def render_behaviors_after_eval(requester: int, selected: int):
+    """Dopo Evaluate: mostra comportamenti (provider + recommender in 3 colonne)."""
+    # Provider behavior
+    mal_t = S.malicious_type.get(selected)
+    is_attacker = mal_t is not None
+    icon = "❌" if is_attacker else "✅"
+    st.markdown("**Provider behavior**")
+    st.write(f"{icon} DT {selected}: {provider_behavior_full(mal_t)}")
+
+    # Recommenders behavior (neighbors) — 3 colonne
+    st.markdown("**Recommenders behavior**")
+    if S.Gdt is None:
+        st.info("No neighbors available.")
+        return
+
+    try:
+        neighbors = sorted(list(S.Gdt.neighbors(requester)))
+    except Exception:
+        neighbors = []
+
+    # escludi il provider se è anche vicino
+    neighbors = [n for n in neighbors if n != selected]
+
+    if not neighbors:
+        st.info("No neighbors available.")
+        return
+
+    col1, col2, col3 = st.columns(3)
+    cols = (col1, col2, col3)
+
+    for idx, n in enumerate(neighbors):
+        rec_t = S.rec_malicious_type.get(n)
+        is_attacker_r = rec_t is not None
+        icon_r = "❌" if is_attacker_r else "✅"
+        cols[idx % 3].write(f"{icon_r} DT {n}: {recommender_behavior_full(rec_t)}")
 
 
-
-        
 # -------------------- Init una tantum -------------------- #
 def ensure_network_ready():
     if not S.created:
@@ -279,10 +331,10 @@ def ensure_network_ready():
             elif i in ooa_nodes:
                 S.malicious_type[int(i)] = "OOA"
 
-        # --------- Malevoli nelle raccomandazioni: 70% (35% BMA + 35% BSA) ---------
+        # --------- Malevoli nelle raccomandazioni: 70% (55% BMA + 15% BSA) ---------
         rng_r = np.random.default_rng(S.seed + 3030)
-        num_bma = int(0.35 * S.n)
-        num_bsa = int(0.35 * S.n)
+        num_bma = int(0.55 * S.n)
+        num_bsa = int(0.15 * S.n)
         rec_mal_nodes = rng_r.choice(np.arange(S.n), size=(num_bma + num_bsa), replace=False).tolist()
         bma_nodes = set(rec_mal_nodes[:num_bma])
         bsa_nodes = set(rec_mal_nodes[num_bma:])
@@ -295,7 +347,6 @@ def ensure_network_ready():
                 S.rec_malicious_type[i] = "BSA"
             else:
                 S.rec_malicious_type[i] = None
-
 
         S.created = True
 
@@ -328,11 +379,11 @@ with right:
         S.selected = None
         S.evaluated = False
         S.last_eval_ok = None
+        S.show_behaviors = False
 
-    # Helper per label con tipo malevolo (sul servizio)
+    # Provider label: SOLO "DT n"
     def provider_label(i: int) -> str:
-        t = S.malicious_type.get(i)
-        return f"DT {i} ({t})" if t else f"DT {i}"
+        return f"DT {i}"
 
     if S.providers:
         st.markdown("**Service Discovery**")
@@ -348,8 +399,9 @@ with right:
             S.selected = sel
             S.evaluated = False
             S.last_eval_ok = None
+            S.show_behaviors = False
 
-        # Mostra anteprima (non altera contatori OOA)
+        # Anteprima (non altera contatori OOA)
         if S.selected is not None:
             mal_t = S.malicious_type.get(S.selected)
             ooa_cnt = S.ooa_counter.get((S.requester, S.selected), 0)
@@ -359,12 +411,11 @@ with right:
             unit = " °C" if S.service == "Temperature" else (" %" if S.service == "Humidity" else " W")
             st.metric(f"{S.service} from {provider_label(S.selected)}", f"{preview_val:.1f}{unit}")
 
-            # --- Due pulsanti affiancati: Reccomandations (popover) a sinistra + Evaluate Service a destra ---
+            # --- Pulsanti affiancati: Reccomandations (popover) + Evaluate Service ---
             c_rec, c_eval = st.columns([0.5, 1.5])
 
-            # 1) POPUP RECcomandations: sempre disponibile.
+            # 1) POPUP Reccomandations (SOLO DT + verdict)
             with c_rec.popover("Reccomandations"):
-                # Se non esiste ancora una valutazione "reale", usiamo la preview corrente
                 provider_is_benign_for_recs = S.last_eval_ok
                 if provider_is_benign_for_recs is None:
                     provider_is_benign_for_recs = is_value_benign(S.service, preview_val)
@@ -375,7 +426,7 @@ with right:
                     last_eval_ok=provider_is_benign_for_recs,
                 )
 
-            # 2) EVALUATE SERVICE: esegue la valutazione "reale" (avanza OOA, salva esito)
+            # 2) EVALUATE SERVICE
             eval_btn_key = f"{PAGE_TAG}-eval-btn-{S.service}-{S.requester}-{S.selected}"
             with c_eval:
                 if st.button("Evaluate Service", key=eval_btn_key):
@@ -383,19 +434,25 @@ with right:
                     rng_eval = np.random.default_rng(S.seed + 777 + S.selected + 1000 * curr_cnt)
                     eval_val = provider_value(S.service, S.requester, S.selected, mal_t, curr_cnt, rng_eval)
                     S.readings[(S.service, S.selected)] = eval_val
-                    # aggiorna contatore se OOA
                     if mal_t == "OOA":
                         S.ooa_counter[(S.requester, S.selected)] = curr_cnt + 1
-                    # esito ufficiale su soglie benevole
                     S.last_eval_ok = is_value_benign(S.service, eval_val)
                     S.evaluated = True
+                    S.show_behaviors = False  # richiedi click esplicito del bottone
 
-            # --- Verdettto del servizio (sempre sotto ai due pulsanti) ---
+            # --- Esito + Show behaviours ---
             if S.evaluated:
                 if S.last_eval_ok:
                     st.success("Correct")
                 else:
                     st.error("Wrong")
 
+                behav_btn_key = f"{PAGE_TAG}-behav-btn-{S.service}-{S.requester}-{S.selected}"
+                if not S.show_behaviors:
+                    if st.button("Show behaviours", key=behav_btn_key):
+                        S.show_behaviors = True
+
+                if S.show_behaviors:
+                    render_behaviors_after_eval(requester=S.requester, selected=S.selected)
 
 draw_graph()
