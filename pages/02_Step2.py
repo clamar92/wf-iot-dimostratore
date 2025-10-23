@@ -229,10 +229,7 @@ def ensure_network_ready():
             rng_prov = np.random.default_rng(S.seed + 1000 + idx)
             m = int(rng_prov.integers(m_min, m_max + 1))
             prov = set(map(int, rng_prov.choice(nodes, size=m, replace=False)))
-
-            # set vuoto per malevoli
             bad = set() if bad_k == 0 else set(map(int, []))
-
             S.providers_by_service[srv] = prov
             S.bad_by_service[srv] = bad
 
@@ -363,14 +360,16 @@ with right:
         if sel != S.selected:
             S.selected = sel
             S.evaluated = False
-            # Init (o rigenera) i vettori per il provider selezionato
+            # ------------- Rigenera vettori per il provider selezionato (50/50; direct talvolta vuota) -------------
             if S.selected is not None:
-                if S.selected not in S.agg_direct:
-                    rng = np.random.default_rng(S.seed + 999 + S.selected)
-                    S.agg_direct[S.selected] = (rng.random(5) < 0.75).astype(int).tolist()
-                if S.selected not in S.agg_indirect:
-                    rng = np.random.default_rng(S.seed + 1999 + S.selected)
-                    S.agg_indirect[S.selected] = (rng.random(10) < 0.75).astype(int).tolist()
+                rng_d = np.random.default_rng(S.seed + 999 + S.selected)
+                rng_i = np.random.default_rng(S.seed + 1999 + S.selected)
+                # 20% probabilità di nessuna direct experience
+                if rng_d.random() < 0.20:
+                    S.agg_direct[S.selected] = []
+                else:
+                    S.agg_direct[S.selected] = rng_d.integers(0, 2, size=5).tolist()
+                S.agg_indirect[S.selected] = rng_i.integers(0, 2, size=10).tolist()
 
         # Reading per (service, provider) — cache
         SERVICE_SEED = {"Temperature": 11, "Humidity": 22, "Power": 33}
@@ -386,164 +385,154 @@ with right:
             unit = " °C" if S.service == "Temperature" else (" %" if S.service == "Humidity" else " W")
             st.metric(f"{S.service} from DT {S.selected}", f"{val:.1f}{unit}")
 
-            # Invio servizio
+            # -------------------- TRUST EVALUATION (subito dopo Service Discovery) -------------------- #
+            title_sel = f"Trust Evaluation DT {S.selected}" if S.selected is not None else "Trust Evaluation"
+            st.markdown(
+                f"<div style='margin-top:10px; margin-bottom:6px;'><span style='font-weight:600; font-size:1.05rem;'>{title_sel}</span></div>",
+                unsafe_allow_html=True,
+            )
+
+            # CSS popover (dimensioni come da tua versione)
+            st.markdown("""
+            <style>
+            /* Tutto il testo dentro il corpo del popover */
+            div[data-testid="stPopoverBody"] * { font-size: 1.2rem !important; }
+            /* Etichette metriche */
+            div[data-testid="stPopoverBody"] [data-testid="stMetricLabel"] { font-size: 1.35rem !important; }
+            /* Valori numerici */
+            div[data-testid="stPopoverBody"] [data-testid="stMetricValue"] { font-size: 1.6rem !important; }
+            </style>
+            """, unsafe_allow_html=True)
+
+            # Popover buttons
+            c1, c2, c3, c4, c5 = st.columns(5)
+
+            with c1.popover("Composition"):
+                st.markdown("**▶ QoS**")
+                cap = S.comp_cap.get(S.selected, float("nan"))
+                tresp = S.time_resp.get(S.selected, float("nan"))
+                q1, q2 = st.columns(2)
+                q1.metric("Capabilities", f"{cap:.2f}")
+                q2.metric("Delay", f"{tresp:.3f} s")
+
+                st.markdown("**▶ Social**")
+                rel = 1.0 if (S.Gdt is not None and S.Gdt.has_edge(S.requester, S.selected)) else 0.5
+                st.metric("Relation", f"{rel:.1f}")
+
+            with c2.popover("Aggregation"):
+                st.markdown("**▶ Node characteristics**")
+                cap = S.comp_cap.get(S.selected, float("nan"))
+                tresp = S.time_resp.get(S.selected, float("nan"))
+                rel = 1.0 if (S.Gdt is not None and S.Gdt.has_edge(S.requester, S.selected)) else 0.5
+                a1, a2, a3 = st.columns(3)
+                a1.metric("Capabilities", f"{cap:.2f}")
+                a2.metric("Delay", f"{tresp:.3f} s")
+                a3.metric("Relation", f"{rel:.1f}")
+
+                st.markdown("**▶ Direct experience**")
+                dir_vec = S.agg_direct.get(S.selected, [])
+                st.code(str(dir_vec), language="text")
+
+                st.markdown("**▶ Indirect experience**")
+                ind_vec = S.agg_indirect.get(S.selected, [])
+                st.code(str(ind_vec), language="text")
+
+                st.markdown("**Aggregation functions:** Weighted Sum, Fuzzy Logic, Neural Networks, etc.")
+
+            with c3.popover("Formation"):
+                # Single trust
+                st.markdown("**▶ Single trust**")
+                dvec = S.agg_direct.get(S.selected, [])
+                ivec = S.agg_indirect.get(S.selected, [])
+                exp = float(np.mean(dvec)) if dvec else 0.0       # direct vuota => 0
+                rec = float(np.mean(ivec)) if ivec else float("nan")
+                f1, f2 = st.columns(2)
+                f1.metric("Experience", f"{exp:.2f}")
+                f2.metric("Recommendations", f"{rec:.2f}")
+
+                # Multi trust
+                st.markdown("**▶ Multi trust**")
+                all_vals = dvec + ivec
+                trust_val = float(np.mean(all_vals)) if all_vals else 0.0
+                st.metric("Aggregated trust", f"{trust_val:.2f}")
+
+            with c4.popover("Propagation"):
+                # --- Centralized ---
+                st.markdown("""
+                <div style='line-height: 1.2;'>
+                <b>▶ Centralized</b><br>
+                All nodes in the network will be<br>
+                able to see these trust evaluations.
+                </div>
+                """, unsafe_allow_html=True)
+                st.markdown("")
+
+                # --- Distributed ---
+                st.markdown("""
+                <div style='line-height: 1.2;'>
+                <b>▶ Distributed</b><br>
+                """, unsafe_allow_html=True)
+
+                if S.Gdt is not None and S.requester is not None:
+                    try:
+                        neighbors = sorted(list(S.Gdt.neighbors(S.requester)))
+                    except Exception:
+                        neighbors = []
+                    if S.selected is not None:
+                        neighbors = [n for n in neighbors if n != S.selected]
+                    if neighbors:
+                        targets = ", ".join([f"DT {n}" for n in neighbors])
+                        st.markdown(f"""
+                        <div style='line-height: 1.2;'>
+                        Trust values will be sent only<br>
+                        to directly connected nodes:<br>
+                        {targets}
+                        </div>
+                        """, unsafe_allow_html=True)
+                    else:
+                        st.markdown("""
+                        <div style='line-height: 1.2;'>
+                        The requester has no neighbors (or all are excluded):<br>
+                        no node will receive the distributed propagation.
+                        </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    st.info("Topology not available.")
+
+            with c5.popover("Update"):
+                st.markdown("""
+                <div style='line-height: 1.2;'>
+                <b>▶ Event-driven</b><br>
+                Trust update occurs immediately after<br>
+                a specific interaction or transaction.
+                </div>
+                """, unsafe_allow_html=True)
+
+                st.markdown("")
+                
+                st.markdown("""
+                <div style='line-height: 1.2;'>
+                <b>▶ Time-driven</b><br>
+                Trust update takes place at regular,<br>
+                predefined intervals, regardless of<br>
+                specific interactions.
+                </div>
+                """, unsafe_allow_html=True)
+
+            # -------------------- Pulsante DOPO la Trust Evaluation -------------------- #
+            st.markdown("<div style='margin-bottom: 25px;'></div>", unsafe_allow_html=True)
             if st.button("Send Service", key=f"{PAGE_TAG}-eval-btn"):
                 S.evaluated = True
 
             if S.evaluated:
-                st.success("Service received")
-
-                # -------------------- TRUST EVALUATION (nuova sezione) -------------------- #
-                title_sel = f"Trust Evaluation DT {S.selected}" if S.selected is not None else "Trust Evaluation"
-
-                st.markdown(
-                    f"<div style='margin-top:10px; margin-bottom:6px;'><span style='font-weight:600; font-size:1.05rem;'>{title_sel}</span></div>",
-                    unsafe_allow_html=True,
-                )
-
-                st.markdown("""
-                <style>
-                /* 1️⃣ Tutto il testo dentro il corpo del popover */
-                div[data-testid="stPopoverBody"] * {
-                    font-size: 1.2rem !important;
-                }
-
-                /* 2️⃣ Etichette metriche come "Computation capabilities" */
-                div[data-testid="stPopoverBody"] [data-testid="stMetricLabel"] {
-                    font-size: 1.35rem !important;
-                }
-
-                /* 3️⃣ Valori numerici (li lasciamo grandi ma armonizzati) */
-                div[data-testid="stPopoverBody"] [data-testid="stMetricValue"] {
-                    font-size: 1.6rem !important;
-                }
-                </style>
-                """, unsafe_allow_html=True)
-
-                # ATTENZIONE: ordina i pulsanti come richiesto → Composition, Aggregation, Formation, Propagation, Update
-                c1, c2, c3, c4, c5 = st.columns(5)
-
-                with c1.popover("Composition"):
-                    st.markdown("**▶ QoS**")
-                    if S.selected is not None:
-                        cap = S.comp_cap.get(S.selected, float("nan"))
-                        tresp = S.time_resp.get(S.selected, float("nan"))
-                        q1, q2 = st.columns(2)
-                        q1.metric("Capabilities", f"{cap:.2f}")
-                        q2.metric("Delay", f"{tresp:.3f} s")
-                    else:
-                        st.info("Seleziona un provider per vedere i valori QoS.")
-
-                    st.markdown("**▶ Social**")
-                    if S.selected is not None and S.Gdt is not None:
-                        rel = 1.0 if S.Gdt.has_edge(S.requester, S.selected) else 0.5
-                        st.metric("Relation", f"{rel:.1f}")
-                    else:
-                        st.info("Relation disponibile dopo la selezione del provider.")
-
-                with c2.popover("Aggregation"):
-                    # --- Node characteristics (le 3 viste prima) ---
-                    st.markdown("**▶ Node characteristics**")
-                    if S.selected is not None:
-                        cap = S.comp_cap.get(S.selected, float("nan"))
-                        tresp = S.time_resp.get(S.selected, float("nan"))
-                        rel = 1.0 if (S.Gdt is not None and S.Gdt.has_edge(S.requester, S.selected)) else 0.5
-                        a1, a2, a3 = st.columns(3)
-                        a1.metric("Capabilities", f"{cap:.2f}")
-                        a2.metric("Delay", f"{tresp:.3f} s")
-                        a3.metric("Relation", f"{rel:.1f}")
-                    else:
-                        st.info("Seleziona un provider per vedere le caratteristiche del nodo.")
-
-                    # --- Direct experience (5 valori 0/1, più 1) ---
-                    st.markdown("**▶ Direct experience**")
-                    if S.selected is not None:
-                        if S.selected not in S.agg_direct:
-                            rng = np.random.default_rng(S.seed + 999 + S.selected)
-                            vec = (rng.random(5) < 0.75).astype(int).tolist()
-                            S.agg_direct[S.selected] = vec
-                        dir_vec = S.agg_direct[S.selected]
-                        st.code(str(dir_vec), language="text")
-                    else:
-                        st.info("Disponibile dopo la selezione del provider.")
-
-                    # --- Indirect experience (10 valori 0/1, più 1) ---
-                    st.markdown("**▶ Indirect experience**")
-                    if S.selected is not None:
-                        if S.selected not in S.agg_indirect:
-                            rng = np.random.default_rng(S.seed + 1999 + S.selected)
-                            vec = (rng.random(10) < 0.75).astype(int).tolist()
-                            S.agg_indirect[S.selected] = vec
-                        ind_vec = S.agg_indirect[S.selected]
-                        st.code(str(ind_vec), language="text")
-                    else:
-                        st.info("Disponibile dopo la selezione del provider.")
-
-                    # --- Aggregation functions note ---
-                    st.markdown("**Aggregation functions:** Weighted Sum, Fuzzy Logic, Neural Networks, etc.")
-
-                with c3.popover("Formation"):
-                    # --- Single trust ---
-                    st.markdown("**▶ Single trust**")
-                    if S.selected is not None:
-                        dvec = S.agg_direct.get(S.selected, [])
-                        ivec = S.agg_indirect.get(S.selected, [])
-                        exp = float(np.mean(dvec)) if dvec else float("nan")
-                        rec = float(np.mean(ivec)) if ivec else float("nan")
-                        f1, f2 = st.columns(2)
-                        f1.metric("Experience", f"{exp:.2f}")
-                        f2.metric("Recommendations", f"{rec:.2f}")
-                    else:
-                        st.info("Seleziona un provider per vedere i valori di single trust.")
-
-                    # --- Multi trust ---
-                    st.markdown("**▶ Multi trust**")
-                    if S.selected is not None:
-                        all_vals = S.agg_direct.get(S.selected, []) + S.agg_indirect.get(S.selected, [])
-                        trust_val = float(np.mean(all_vals)) if all_vals else float("nan")
-                        st.metric("Aggregated trust", f"{trust_val:.2f}")
-                    else:
-                        st.info("Seleziona un provider per vedere il trust aggregato.")
-
-                with c4.popover("Propagation"):
-                    # --- Centralized ---
-                    st.markdown("**▶ Centralized**")
-                    st.write("All nodes in the network will be")
-                    st.write("able to see these trust evaluations.")
-
-                    # --- Distributed ---
-                    st.markdown("**▶ Distributed**")
-                    if S.Gdt is not None and S.requester is not None:
-                        try:
-                            neighbors = sorted(list(S.Gdt.neighbors(S.requester)))
-                        except Exception:
-                            neighbors = []
-                        # Exclude the selected provider from neighbors (if present)
-                        if S.selected is not None:
-                            neighbors = [n for n in neighbors if n != S.selected]
-                        if neighbors:
-                            targets = ", ".join([f"DT {n}" for n in neighbors])
-                            st.write(f"Trust values will be sent only")
-                            st.write(f"to directly connected nodes:")
-                            st.write(f"{targets}")
-                        else:
-                            st.write("The requester has no neighbors (or all are excluded):")
-                            st.write("no node will receive the distributed propagation.")
-                    else:
-                        st.info("Topology not available.")
-
-                
-                with c5.popover("Update"):
-                    st.markdown("**▶ Event-driven**")
-                    st.write("Trust update occurs immediately after")
-                    st.write("a specific interaction or transaction.")
-
-                    st.markdown("**▶ Time-driven**")
-                    st.write("Trust update takes place at regular,")
-                    st.write("predefined intervals, regardless of")
-                    st.write("specific interactions.")
-
-
+                # Ricomputa rapidamente trust_val per sicurezza
+                dvec = S.agg_direct.get(S.selected, [])
+                ivec = S.agg_indirect.get(S.selected, [])
+                trust_val = float(np.mean(dvec + ivec)) if (dvec or ivec) else 0.0
+                if trust_val > 0.5:
+                    st.success("Correct")
+                else:
+                    st.error("Uncorrect")
 
 # Disegna UNA SOLA VOLTA per run, a stato aggiornato
 draw_graph_if_needed(force=True)
