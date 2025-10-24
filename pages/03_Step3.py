@@ -38,18 +38,15 @@ PROVIDER_BEHAVIOR_FULL = {
     "DA":  "Discrimination Attack",
     "OOA": "On-Off Attack",
 }
-RECOMMENDER_BEHAVIOR_FULL = {
-    "BMA": "Bad Mouthing Attack",
-    "BSA": "Ballot Stuffing Attack",
-}
+
 
 def provider_behavior_full(t: str | None) -> str:
     # Cooperativi -> Benevolent
     return PROVIDER_BEHAVIOR_FULL.get(t, "Benevolent")
 
 def recommender_behavior_full(t: str | None) -> str:
-    # Cooperativi -> Benevolent
-    return RECOMMENDER_BEHAVIOR_FULL.get(t, "Benevolent")
+    # Maliziosi unificati -> BMA/BSA, altrimenti Benevolent
+    return "BMA/BSA" if t else "Benevolent"
 
 # -------------------- State -------------------- #
 @dataclass
@@ -223,20 +220,36 @@ def is_value_benign(service: str, value: float) -> bool:
     return False
 
 # ------- Recommendation logic ------- #
-def compute_recommendation(is_malicious_recommender: str | None, provider_is_benign_now: bool, _provider_mal_type_unused: str | None = None) -> bool:
+def compute_recommendation(is_malicious_recommender: str | None,
+                           _provider_is_benign_now_ignored: bool,
+                           provider_mal_type: str | None = None) -> bool:
     """
     True -> "Provider is trustworthy", False -> "Provider is untrustworthy".
-    - None (benevolent): segue l’esito corrente (benign/malicious).
-    - BMA: sempre 'untrustworthy'.
-    - BSA: sempre 'trustworthy'.
+
+    ORA la "verità" è basata *sul tipo del provider*:
+      - Provider benevolent  -> verità = TRUSTWORTHY
+      - Provider ME/DA/OOA   -> verità = UNTRUSTWORTHY
+
+    Recommenders:
+      - None (benevolent)    -> dicono la verità
+      - "BMA/BSA" (liars)    -> mentono SEMPRE (invertendo la verità)
+      - "BMA"/"BSA" (fallback vecchio) -> mentono sempre
     """
+    # Verità basata sul TIPO del provider
+    provider_is_benevolent = (provider_mal_type is None)
+
+    # Benevolent recommender -> dice la verità
     if is_malicious_recommender is None:
-        return provider_is_benign_now
-    if is_malicious_recommender == "BMA":
-        return False
-    if is_malicious_recommender == "BSA":
-        return True
-    return provider_is_benign_now
+        return provider_is_benevolent
+
+    # Liars unificati (o vecchie etichette) -> invertono la verità
+    if is_malicious_recommender in ("BMA/BSA", "BMA", "BSA"):
+        return not provider_is_benevolent
+
+    # Fallback prudente
+    return provider_is_benevolent
+
+
 
 def render_recommendations(requester: int, selected: int, provider_mal_type: str | None, last_eval_ok: bool):
     """Mostra le reccomandations dei neighbor del requester (solo DT + verdict, niente comportamenti)."""
@@ -331,22 +344,19 @@ def ensure_network_ready():
             elif i in ooa_nodes:
                 S.malicious_type[int(i)] = "OOA"
 
-        # --------- Malevoli nelle raccomandazioni: 70% (55% BMA + 15% BSA) ---------
+        # --------- Recommenders malevoli unificati: BMA/BSA (mentono sempre) ---------
         rng_r = np.random.default_rng(S.seed + 3030)
-        num_bma = int(0.55 * S.n)
-        num_bsa = int(0.15 * S.n)
-        rec_mal_nodes = rng_r.choice(np.arange(S.n), size=(num_bma + num_bsa), replace=False).tolist()
-        bma_nodes = set(rec_mal_nodes[:num_bma])
-        bsa_nodes = set(rec_mal_nodes[num_bma:])
 
-        S.rec_malicious_type = {}
-        for i in range(S.n):
-            if i in bma_nodes:
-                S.rec_malicious_type[i] = "BMA"
-            elif i in bsa_nodes:
-                S.rec_malicious_type[i] = "BSA"
-            else:
-                S.rec_malicious_type[i] = None
+        # Usa ancora due percentuali se vuoi mantenerle separabili,
+        # ma l'etichetta finale è unica: "BMA/BSA"
+        REC_LIAR_PCT = 0.50  # 50% di raccomandatari BMA/BSA
+        total_rec_mal = int(REC_LIAR_PCT * S.n)
+
+        rec_mal_nodes = set(
+            rng_r.choice(np.arange(S.n), size=total_rec_mal, replace=False).tolist()
+        )
+
+        S.rec_malicious_type = {i: ("BMA/BSA" if i in rec_mal_nodes else None) for i in range(S.n)}
 
         S.created = True
 
