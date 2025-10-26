@@ -349,7 +349,7 @@ def ensure_network_ready():
 
         # Usa ancora due percentuali se vuoi mantenerle separabili,
         # ma l'etichetta finale è unica: "BMA/BSA"
-        REC_LIAR_PCT = 0.50  # 50% di raccomandatari BMA/BSA
+        REC_LIAR_PCT = 0.70  # 50% di raccomandatari BMA/BSA
         total_rec_mal = int(REC_LIAR_PCT * S.n)
 
         rec_mal_nodes = set(
